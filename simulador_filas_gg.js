@@ -1,19 +1,70 @@
-// Simulador de Fila G/G/c/K
-// Altere os parâmetros abaixo para testar diferentes cenários
+// Simulador de Rede de Filas G/G/c/K
+// Suporta filas individuais e redes de filas em tandem
 
-// Para G/G/1/5: numServidores = 1, capacidadeTotal = 5
-// Para G/G/2/5: numServidores = 2, capacidadeTotal = 5
-let numServidores = 1; // ← ALTERAR AQUI: 1 ou 2 servidores
-let capacidadeTotal = 5; // ← Capacidade total do sistema
+// =================================================================
+// CONFIGURAÇÃO DA REDE DE FILAS - ALTERAR AQUI
+// =================================================================
+
+// Modo de operação: 'individual' ou 'rede'
+let modoSimulacao = "rede"; // ← ALTERAR AQUI: 'individual' ou 'rede'
+
+// CONFIGURAÇÃO PARA FILA INDIVIDUAL (usado quando modoSimulacao = 'individual')
+let configFilaIndividual = {
+  numServidores: 1,
+  capacidade: 5,
+  minChegada: 2.0,
+  maxChegada: 5.0,
+  minAtendimento: 3.0,
+  maxAtendimento: 5.0,
+};
+
+// CONFIGURAÇÃO PARA REDE DE FILAS (usado quando modoSimulacao = 'rede')
+let configRede = {
+  // Primeira chegada na rede
+  primeiraChegada: 1.5,
+
+  // Definição das filas na rede
+  filas: [
+    {
+      id: 1,
+      nome: "Fila 1",
+      numServidores: 2,
+      capacidade: 3,
+      // Chegadas externas (null = não recebe chegadas de fora)
+      minChegada: 1.0,
+      maxChegada: 4.0,
+      // Atendimento
+      minAtendimento: 3.0,
+      maxAtendimento: 4.0,
+    },
+    {
+      id: 2,
+      nome: "Fila 2",
+      numServidores: 1,
+      capacidade: 5,
+      // Sem chegadas externas - só recebe da Fila 1
+      minChegada: null,
+      maxChegada: null,
+      // Atendimento
+      minAtendimento: 2.0,
+      maxAtendimento: 3.0,
+    },
+  ],
+
+  // Roteamento: de qual fila para qual fila (probabilidades)
+  roteamento: {
+    1: { 2: 1.0 }, // 100% da Fila 1 vai para Fila 2
+    2: { saida: 1.0 }, // 100% da Fila 2 sai do sistema
+  },
+};
+
+// Parâmetros gerais
 let maxNumeros = 100000; // Números pseudoaleatórios a usar
 
-// Tempos das distribuições uniformes
-let minChegada = 2.0;
-let maxChegada = 5.0;
-let minAtendimento = 3.0;
-let maxAtendimento = 5.0;
+// =================================================================
+// GERADOR DE NÚMEROS PSEUDOALEATÓRIOS
+// =================================================================
 
-// Gerador de números pseudoaleatórios
 let a = 1664525;
 let c = 1013904223;
 let M = Math.pow(2, 32);
@@ -27,26 +78,40 @@ function NextRandom() {
   return lastRandom / M;
 }
 
-// Gera número uniforme entre min e max
 function gerarUniforme(min, max) {
   return min + NextRandom() * (max - min);
 }
 
-// Variáveis da simulação
+// =================================================================
+// VARIÁVEIS DA SIMULAÇÃO
+// =================================================================
+
 let tempoSimulacao = 0.0;
-let clientesNoSistema = 0;
-let servidoresOcupados = 0;
 let tempoUltimoEvento = 0.0;
-let temposEstados = new Array(capacidadeTotal + 1).fill(0.0);
 let escalonador = [];
 let proximoIdCliente = 1;
+
+// Para fila individual
+let clientesNoSistema = 0;
+let servidoresOcupados = 0;
+let temposEstados = [];
 let clientesPerdidos = 0;
 
-function criarEvento(tipo, tempo, clienteId) {
+// Para rede de filas
+let estadoFilas = {}; // Estado de cada fila
+let estatisticasFilas = {}; // Estatísticas de cada fila
+
+// =================================================================
+// ESTRUTURA DE EVENTOS
+// =================================================================
+
+function criarEvento(tipo, tempo, clienteId, filaId = null, dados = {}) {
   return {
     tipo: tipo,
     tempo: tempo,
     clienteId: clienteId,
+    filaId: filaId,
+    dados: dados,
   };
 }
 
@@ -59,70 +124,100 @@ function proximoEvento() {
   return escalonador.shift();
 }
 
-function atualizarEstatisticas() {
+// =================================================================
+// INICIALIZAÇÃO
+// =================================================================
+
+function inicializarFilaIndividual() {
+  let config = configFilaIndividual;
+  clientesNoSistema = 0;
+  servidoresOcupados = 0;
+  temposEstados = new Array(config.capacidade + 1).fill(0.0);
+  clientesPerdidos = 0;
+}
+
+function inicializarRede() {
+  estadoFilas = {};
+  estatisticasFilas = {};
+
+  configRede.filas.forEach((fila) => {
+    estadoFilas[fila.id] = {
+      clientesNoSistema: 0,
+      servidoresOcupados: 0,
+      tempoUltimaAtualizacao: 0.0,
+    };
+
+    estatisticasFilas[fila.id] = {
+      temposEstados: new Array(fila.capacidade + 1).fill(0.0),
+      clientesPerdidos: 0,
+    };
+  });
+}
+
+function atualizarEstatisticasFilaIndividual() {
   let deltaT = tempoSimulacao - tempoUltimoEvento;
   temposEstados[clientesNoSistema] += deltaT;
   tempoUltimoEvento = tempoSimulacao;
 }
 
-function procedimentoChegada(evento) {
+function atualizarEstatisticasFila(filaId) {
+  let estado = estadoFilas[filaId];
+  let stats = estatisticasFilas[filaId];
+  let deltaT = tempoSimulacao - estado.tempoUltimaAtualizacao;
+
+  stats.temposEstados[estado.clientesNoSistema] += deltaT;
+  estado.tempoUltimaAtualizacao = tempoSimulacao;
+}
+
+// =================================================================
+// PROCEDIMENTOS PARA FILA INDIVIDUAL
+// =================================================================
+
+function procedimentoChegadaIndividual(evento) {
+  let config = configFilaIndividual;
+
   console.log(
     `Tempo ${tempoSimulacao.toFixed(4)}: Cliente ${evento.clienteId} chegou`
   );
 
-  atualizarEstatisticas();
+  atualizarEstatisticasFilaIndividual();
 
-  if (clientesNoSistema < capacidadeTotal) {
+  if (clientesNoSistema < config.capacidade) {
     clientesNoSistema++;
 
-    // Se tem servidor livre, atende direto
-    if (servidoresOcupados < numServidores) {
+    if (servidoresOcupados < config.numServidores) {
       servidoresOcupados++;
-      let tempoAtendimento = gerarUniforme(minAtendimento, maxAtendimento);
+      let tempoAtendimento = gerarUniforme(
+        config.minAtendimento,
+        config.maxAtendimento
+      );
       let eventoSaida = criarEvento(
-        "SAIDA",
+        "SAIDA_INDIVIDUAL",
         tempoSimulacao + tempoAtendimento,
         evento.clienteId
       );
       agendarEvento(eventoSaida);
 
-      if (numServidores === 1) {
-        console.log(
-          `  -> Cliente ${
-            evento.clienteId
-          } iniciou atendimento, sairá em ${tempoAtendimento.toFixed(4)}`
-        );
-      } else {
-        console.log(
-          `  -> Cliente ${
-            evento.clienteId
-          } iniciou atendimento no servidor ${servidoresOcupados}, sairá em ${tempoAtendimento.toFixed(
-            4
-          )}`
-        );
-      }
+      console.log(
+        `  -> Cliente ${
+          evento.clienteId
+        } iniciou atendimento, sairá em ${tempoAtendimento.toFixed(4)}`
+      );
     } else {
-      // Vai pra fila
-      if (numServidores === 1) {
-        console.log(
-          `  -> Cliente ${evento.clienteId} entrou na fila de espera (${clientesNoSistema} no sistema)`
-        );
-      } else {
-        console.log(
-          `  -> Cliente ${evento.clienteId} entrou na fila de espera (${clientesNoSistema} no sistema, ${servidoresOcupados} servidores ocupados)`
-        );
-      }
+      console.log(
+        `  -> Cliente ${evento.clienteId} entrou na fila de espera (${clientesNoSistema} no sistema)`
+      );
     }
   } else {
     clientesPerdidos++;
     console.log(`  -> Cliente ${evento.clienteId} rejeitado - sistema cheio!`);
   }
 
-  // Agenda próxima chegada se ainda tem números disponíveis
+  // Agenda próxima chegada
   if (numerosUsados < maxNumeros) {
-    let intervaloChegada = gerarUniforme(minChegada, maxChegada);
+    let intervaloChegada = gerarUniforme(config.minChegada, config.maxChegada);
     let proximaChegada = criarEvento(
-      "CHEGADA",
+      "CHEGADA_INDIVIDUAL",
       tempoSimulacao + intervaloChegada,
       proximoIdCliente
     );
@@ -131,85 +226,289 @@ function procedimentoChegada(evento) {
   }
 }
 
-function procedimentoSaida(evento) {
+function procedimentoSaidaIndividual(evento) {
   console.log(
     `Tempo ${tempoSimulacao.toFixed(4)}: Cliente ${evento.clienteId} saiu`
   );
 
-  atualizarEstatisticas();
+  atualizarEstatisticasFilaIndividual();
   clientesNoSistema--;
 
-  // Se ainda tem gente na fila, próximo começa o atendimento
-  if (clientesNoSistema >= numServidores) {
-    let tempoAtendimento = gerarUniforme(minAtendimento, maxAtendimento);
-    let proximoClienteId =
-      proximoIdCliente - (clientesNoSistema - numServidores + 1);
+  if (clientesNoSistema >= configFilaIndividual.numServidores) {
+    let tempoAtendimento = gerarUniforme(
+      configFilaIndividual.minAtendimento,
+      configFilaIndividual.maxAtendimento
+    );
     let eventoSaida = criarEvento(
-      "SAIDA",
+      "SAIDA_INDIVIDUAL",
       tempoSimulacao + tempoAtendimento,
-      proximoClienteId
+      proximoIdCliente - clientesNoSistema
     );
     agendarEvento(eventoSaida);
-
-    if (numServidores === 1) {
-      console.log(
-        `  -> Próximo cliente iniciou atendimento, sairá em ${tempoAtendimento.toFixed(
-          4
-        )}`
-      );
-    } else {
-      console.log(
-        `  -> Cliente da fila iniciou atendimento, sairá em ${tempoAtendimento.toFixed(
-          4
-        )} (${servidoresOcupados} servidores ocupados)`
-      );
-    }
+    console.log(
+      `  -> Próximo cliente iniciou atendimento, sairá em ${tempoAtendimento.toFixed(
+        4
+      )}`
+    );
   } else {
     servidoresOcupados--;
-    if (numServidores > 1) {
-      console.log(
-        `  -> Um servidor ficou livre (${servidoresOcupados} servidores ocupados)`
-      );
-    }
   }
 }
 
-function main() {
-  let tipoSistema = `G/G/${numServidores}/${capacidadeTotal}`;
+// =================================================================
+// PROCEDIMENTOS PARA REDE DE FILAS
+// =================================================================
 
+function encontrarFila(filaId) {
+  return configRede.filas.find((f) => f.id === filaId);
+}
+
+function determinarProximaFila(filaIdAtual) {
+  let roteamento = configRede.roteamento[filaIdAtual];
+  if (!roteamento) return "saida";
+
+  let rand = NextRandom();
+  let acumulado = 0;
+
+  for (let destino in roteamento) {
+    acumulado += roteamento[destino];
+    if (rand <= acumulado) {
+      return destino === "saida" ? "saida" : parseInt(destino);
+    }
+  }
+
+  return "saida";
+}
+
+function procedimentoChegadaRede(evento) {
+  let filaId = evento.filaId;
+  let fila = encontrarFila(filaId);
+  let estado = estadoFilas[filaId];
+  let stats = estatisticasFilas[filaId];
+
+  console.log(
+    `Tempo ${tempoSimulacao.toFixed(4)}: Cliente ${
+      evento.clienteId
+    } chegou na ${fila.nome}`
+  );
+
+  atualizarEstatisticasFila(filaId);
+
+  if (estado.clientesNoSistema < fila.capacidade) {
+    estado.clientesNoSistema++;
+
+    if (estado.servidoresOcupados < fila.numServidores) {
+      estado.servidoresOcupados++;
+      let tempoAtendimento = gerarUniforme(
+        fila.minAtendimento,
+        fila.maxAtendimento
+      );
+      let eventoSaida = criarEvento(
+        "SAIDA_REDE",
+        tempoSimulacao + tempoAtendimento,
+        evento.clienteId,
+        filaId
+      );
+      agendarEvento(eventoSaida);
+
+      console.log(
+        `  -> Cliente ${evento.clienteId} iniciou atendimento na ${
+          fila.nome
+        }, sairá em ${tempoAtendimento.toFixed(4)}`
+      );
+    } else {
+      console.log(
+        `  -> Cliente ${evento.clienteId} entrou na fila de espera da ${fila.nome} (${estado.clientesNoSistema} clientes)`
+      );
+    }
+  } else {
+    stats.clientesPerdidos++;
+    console.log(
+      `  -> Cliente ${evento.clienteId} rejeitado na ${fila.nome} - fila cheia!`
+    );
+  }
+
+  // Agenda próxima chegada externa (só se a fila recebe chegadas de fora)
+  if (fila.minChegada !== null && numerosUsados < maxNumeros) {
+    let intervaloChegada = gerarUniforme(fila.minChegada, fila.maxChegada);
+    let proximaChegada = criarEvento(
+      "CHEGADA_REDE",
+      tempoSimulacao + intervaloChegada,
+      proximoIdCliente,
+      filaId
+    );
+    proximoIdCliente++;
+    agendarEvento(proximaChegada);
+  }
+}
+
+function procedimentoSaidaRede(evento) {
+  let filaId = evento.filaId;
+  let fila = encontrarFila(filaId);
+  let estado = estadoFilas[filaId];
+
+  console.log(
+    `Tempo ${tempoSimulacao.toFixed(4)}: Cliente ${evento.clienteId} saiu da ${
+      fila.nome
+    }`
+  );
+
+  atualizarEstatisticasFila(filaId);
+  estado.clientesNoSistema--;
+
+  // Se ainda tem gente na fila, próximo inicia atendimento
+  if (estado.clientesNoSistema >= fila.numServidores) {
+    let tempoAtendimento = gerarUniforme(
+      fila.minAtendimento,
+      fila.maxAtendimento
+    );
+    let proximoClienteId =
+      proximoIdCliente - (estado.clientesNoSistema - fila.numServidores + 1);
+    let eventoSaida = criarEvento(
+      "SAIDA_REDE",
+      tempoSimulacao + tempoAtendimento,
+      proximoClienteId,
+      filaId
+    );
+    agendarEvento(eventoSaida);
+    console.log(
+      `  -> Próximo cliente iniciou atendimento na ${
+        fila.nome
+      }, sairá em ${tempoAtendimento.toFixed(4)}`
+    );
+  } else {
+    estado.servidoresOcupados--;
+  }
+
+  // Determina próximo destino do cliente
+  let proximoDestino = determinarProximaFila(filaId);
+
+  if (proximoDestino === "saida") {
+    console.log(`  -> Cliente ${evento.clienteId} deixou o sistema`);
+  } else {
+    // Cliente vai para próxima fila
+    let eventoChegada = criarEvento(
+      "CHEGADA_REDE",
+      tempoSimulacao,
+      evento.clienteId,
+      proximoDestino
+    );
+    agendarEvento(eventoChegada);
+  }
+}
+
+// =================================================================
+// FUNÇÃO PRINCIPAL
+// =================================================================
+
+function main() {
   console.log("=".repeat(70));
-  console.log(`SIMULADOR ${tipoSistema}`);
-  console.log("=".repeat(70));
-  console.log(`Configurações:`);
-  console.log(`- Tipo do sistema: ${tipoSistema}`);
-  console.log(`- Servidores: ${numServidores}`);
-  console.log(`- Capacidade total: ${capacidadeTotal} clientes`);
-  console.log(`- Chegadas: Uniforme[${minChegada}, ${maxChegada}]`);
-  console.log(`- Atendimento: Uniforme[${minAtendimento}, ${maxAtendimento}]`);
+
+  if (modoSimulacao === "individual") {
+    console.log(
+      `SIMULADOR FILA INDIVIDUAL G/G/${configFilaIndividual.numServidores}/${configFilaIndividual.capacidade}`
+    );
+    console.log("=".repeat(70));
+    console.log(`Configurações:`);
+    console.log(`- Servidores: ${configFilaIndividual.numServidores}`);
+    console.log(`- Capacidade: ${configFilaIndividual.capacidade} clientes`);
+    console.log(
+      `- Chegadas: Uniforme[${configFilaIndividual.minChegada}, ${configFilaIndividual.maxChegada}]`
+    );
+    console.log(
+      `- Atendimento: Uniforme[${configFilaIndividual.minAtendimento}, ${configFilaIndividual.maxAtendimento}]`
+    );
+
+    inicializarFilaIndividual();
+
+    // Primeira chegada no tempo 2.0
+    tempoSimulacao = 2.0;
+    agendarEvento(criarEvento("CHEGADA_INDIVIDUAL", 2.0, proximoIdCliente));
+    proximoIdCliente++;
+  } else {
+    console.log(`SIMULADOR REDE DE FILAS - ${configRede.filas.length} FILAS`);
+    console.log("=".repeat(70));
+    console.log(`Configurações da Rede:`);
+    console.log(`- Primeira chegada: ${configRede.primeiraChegada}`);
+
+    configRede.filas.forEach((fila) => {
+      console.log(
+        `- ${fila.nome}: G/G/${fila.numServidores}/${fila.capacidade}`
+      );
+      if (fila.minChegada !== null) {
+        console.log(
+          `  Chegadas: Uniforme[${fila.minChegada}, ${fila.maxChegada}]`
+        );
+      } else {
+        console.log(`  Chegadas: Apenas internas`);
+      }
+      console.log(
+        `  Atendimento: Uniforme[${fila.minAtendimento}, ${fila.maxAtendimento}]`
+      );
+    });
+
+    console.log(`Roteamento:`);
+    for (let origem in configRede.roteamento) {
+      let destinos = configRede.roteamento[origem];
+      let filaOrigem = encontrarFila(parseInt(origem));
+      console.log(`  ${filaOrigem.nome}:`);
+      for (let destino in destinos) {
+        if (destino === "saida") {
+          console.log(
+            `    -> Sair do sistema: ${(destinos[destino] * 100).toFixed(1)}%`
+          );
+        } else {
+          let filaDestino = encontrarFila(parseInt(destino));
+          console.log(
+            `    -> ${filaDestino.nome}: ${(destinos[destino] * 100).toFixed(
+              1
+            )}%`
+          );
+        }
+      }
+    }
+
+    inicializarRede();
+
+    // Primeira chegada na primeira fila que recebe chegadas externas
+    tempoSimulacao = configRede.primeiraChegada;
+    let primeiraFila = configRede.filas.find((f) => f.minChegada !== null);
+    if (primeiraFila) {
+      agendarEvento(
+        criarEvento(
+          "CHEGADA_REDE",
+          configRede.primeiraChegada,
+          proximoIdCliente,
+          primeiraFila.id
+        )
+      );
+      proximoIdCliente++;
+    }
+  }
+
   console.log(`- Números aleatórios: ${maxNumeros}`);
   console.log(`- Semente: ${seed}`);
   console.log("=".repeat(70));
 
-  // Primeira chegada sempre no tempo 2.0
-  tempoSimulacao = 2.0;
-  agendarEvento(criarEvento("CHEGADA", 2.0, proximoIdCliente));
-  proximoIdCliente++;
-
   console.log("\nINÍCIO DA SIMULAÇÃO:");
   console.log("-".repeat(50));
 
-  // Loop principal - para quando usar todos os números aleatórios
+  // Loop principal
   while (numerosUsados < maxNumeros && escalonador.length > 0) {
     let evento = proximoEvento();
     tempoSimulacao = evento.tempo;
 
-    if (evento.tipo === "CHEGADA") {
-      procedimentoChegada(evento);
-    } else if (evento.tipo === "SAIDA") {
-      procedimentoSaida(evento);
+    if (evento.tipo === "CHEGADA_INDIVIDUAL") {
+      procedimentoChegadaIndividual(evento);
+    } else if (evento.tipo === "SAIDA_INDIVIDUAL") {
+      procedimentoSaidaIndividual(evento);
+    } else if (evento.tipo === "CHEGADA_REDE") {
+      procedimentoChegadaRede(evento);
+    } else if (evento.tipo === "SAIDA_REDE") {
+      procedimentoSaidaRede(evento);
     }
 
-    // Mostra progresso a cada 10000 números
+    // Mostra progresso
     if (numerosUsados % 10000 === 0 && numerosUsados > 0) {
       console.log(
         `Progresso: ${numerosUsados}/${maxNumeros} números usados, tempo: ${tempoSimulacao.toFixed(
@@ -223,34 +522,84 @@ function main() {
     }
   }
 
-  atualizarEstatisticas();
-
   console.log("-".repeat(50));
   console.log("FIM DA SIMULAÇÃO");
   console.log("=".repeat(70));
 
-  // Mostra os resultados
-  console.log(`\nRESULTADOS DA SIMULAÇÃO ${tipoSistema}:`);
+  // Atualiza estatísticas finais e mostra resultados
+  if (modoSimulacao === "individual") {
+    atualizarEstatisticasFilaIndividual();
+    mostrarResultadosFilaIndividual();
+  } else {
+    configRede.filas.forEach((fila) => {
+      atualizarEstatisticasFila(fila.id);
+    });
+    mostrarResultadosRede();
+  }
+}
+
+function mostrarResultadosFilaIndividual() {
+  let config = configFilaIndividual;
+  let tipo = `G/G/${config.numServidores}/${config.capacidade}`;
+
+  console.log(`\nRESULTADOS DA SIMULAÇÃO ${tipo}:`);
   console.log("=".repeat(70));
   console.log(
     `Tempo total de simulação: ${tempoSimulacao.toFixed(4)} unidades`
   );
   console.log(`Números pseudoaleatórios utilizados: ${numerosUsados}`);
-  console.log(`Clientes perdidos (rejeitados): ${clientesPerdidos}`);
-  console.log();
+  console.log(`Clientes perdidos: ${clientesPerdidos}`);
 
-  console.log("DISTRIBUIÇÃO DE PROBABILIDADES DOS ESTADOS:");
+  mostrarDistribuicaoEstados(temposEstados, "Sistema", tempoSimulacao);
+  mostrarAnalise(
+    temposEstados,
+    clientesPerdidos,
+    config.numServidores,
+    tempoSimulacao
+  );
+}
+
+function mostrarResultadosRede() {
+  console.log(`\nRESULTADOS DA SIMULAÇÃO DA REDE:`);
+  console.log("=".repeat(70));
+  console.log(
+    `Tempo total de simulação: ${tempoSimulacao.toFixed(4)} unidades`
+  );
+  console.log(`Números pseudoaleatórios utilizados: ${numerosUsados}`);
+
+  configRede.filas.forEach((fila) => {
+    let stats = estatisticasFilas[fila.id];
+    console.log(
+      `\n${fila.nome.toUpperCase()} - G/G/${fila.numServidores}/${
+        fila.capacidade
+      }:`
+    );
+    console.log("-".repeat(50));
+    console.log(`Clientes perdidos: ${stats.clientesPerdidos}`);
+
+    mostrarDistribuicaoEstados(stats.temposEstados, fila.nome, tempoSimulacao);
+    mostrarAnalise(
+      stats.temposEstados,
+      stats.clientesPerdidos,
+      fila.numServidores,
+      tempoSimulacao
+    );
+  });
+}
+
+function mostrarDistribuicaoEstados(temposEstados, nomeFila, tempoTotal) {
+  console.log(`\nDISTRIBUIÇÃO DE PROBABILIDADES - ${nomeFila}:`);
   console.log("-".repeat(60));
   console.log("Estado\t| Tempo Acumulado\t| Probabilidade");
   console.log("-".repeat(60));
 
   let somaTempos = 0;
-  for (let i = 0; i <= capacidadeTotal; i++) {
+  for (let i = 0; i < temposEstados.length; i++) {
     somaTempos += temposEstados[i];
   }
 
-  for (let i = 0; i <= capacidadeTotal; i++) {
-    let probabilidade = temposEstados[i] / tempoSimulacao;
+  for (let i = 0; i < temposEstados.length; i++) {
+    let probabilidade = temposEstados[i] / tempoTotal;
     console.log(
       `${i} cliente(s)\t| ${temposEstados[i].toFixed(4)}\t\t| ${(
         probabilidade * 100
@@ -262,63 +611,53 @@ function main() {
   console.log(
     `Verificação: Soma = ${somaTempos.toFixed(
       4
-    )} (deve ser ≈ ${tempoSimulacao.toFixed(4)})`
+    )} (deve ser ≈ ${tempoTotal.toFixed(4)})`
   );
+}
 
-  console.log("\nANÁLISE:");
-  console.log("=".repeat(70));
+function mostrarAnalise(temposEstados, perdidos, numServidores, tempoTotal) {
+  let probVazio = temposEstados[0] / tempoTotal;
+  let probCheio = temposEstados[temposEstados.length - 1] / tempoTotal;
 
-  let probSistemaVazio = temposEstados[0] / tempoSimulacao;
-  let probSistemaCheio = temposEstados[capacidadeTotal] / tempoSimulacao;
-
-  console.log(
-    `Probabilidade do sistema vazio: ${(probSistemaVazio * 100).toFixed(2)}%`
-  );
-  console.log(
-    `Probabilidade de bloqueio: ${(probSistemaCheio * 100).toFixed(2)}%`
-  );
-
-  let numeroMedioClientes = 0;
-  for (let i = 0; i <= capacidadeTotal; i++) {
-    numeroMedioClientes += i * (temposEstados[i] / tempoSimulacao);
+  let numeroMedio = 0;
+  for (let i = 0; i < temposEstados.length; i++) {
+    numeroMedio += i * (temposEstados[i] / tempoTotal);
   }
-  console.log(
-    `Número médio de clientes no sistema: ${numeroMedioClientes.toFixed(4)}`
-  );
 
-  let utilizacao = 1 - probSistemaVazio;
+  let utilizacao = 1 - probVazio;
+
+  console.log(`\nANÁLISE:`);
+  console.log(
+    `Probabilidade do sistema vazio: ${(probVazio * 100).toFixed(2)}%`
+  );
+  console.log(`Probabilidade de bloqueio: ${(probCheio * 100).toFixed(2)}%`);
+  console.log(`Número médio de clientes: ${numeroMedio.toFixed(4)}`);
   console.log(`Utilização do sistema: ${(utilizacao * 100).toFixed(2)}%`);
 
   if (numServidores > 1) {
     let utilizacaoServidor = 0;
-    for (let i = 1; i <= capacidadeTotal; i++) {
+    for (let i = 1; i < temposEstados.length; i++) {
       let servidoresUsados = Math.min(i, numServidores);
-      utilizacaoServidor +=
-        servidoresUsados * (temposEstados[i] / tempoSimulacao);
+      utilizacaoServidor += servidoresUsados * (temposEstados[i] / tempoTotal);
     }
     utilizacaoServidor = utilizacaoServidor / numServidores;
     console.log(
       `Utilização média por servidor: ${(utilizacaoServidor * 100).toFixed(2)}%`
     );
   }
-
-  console.log("=".repeat(70));
-  console.log(`SIMULAÇÃO ${tipoSistema} CONCLUÍDA!`);
-
-  console.log("\n" + "=".repeat(70));
-  console.log("COMO USAR:");
-  console.log("=".repeat(70));
-  console.log(
-    "Para testar diferentes configurações, mude no início do código:"
-  );
-  console.log("");
-  console.log("Para G/G/1/5: numServidores = 1, capacidadeTotal = 5");
-  console.log("Para G/G/2/5: numServidores = 2, capacidadeTotal = 5");
-  console.log("");
-  console.log("Outros parâmetros que você pode alterar:");
-  console.log("- maxNumeros: quantos números aleatórios usar");
-  console.log("- minChegada/maxChegada: tempo entre chegadas");
-  console.log("- minAtendimento/maxAtendimento: tempo de atendimento");
 }
+
+console.log("\n" + "=".repeat(70));
+console.log("INSTRUÇÕES DE USO:");
+console.log("=".repeat(70));
+console.log(
+  "Para alterar o modo de simulação, mude a variável 'modoSimulacao':"
+);
+console.log("- 'individual': simula uma única fila");
+console.log("- 'rede': simula rede de filas em tandem");
+console.log("");
+console.log("Para fila individual, configure 'configFilaIndividual'");
+console.log("Para rede de filas, configure 'configRede'");
+console.log("=".repeat(70));
 
 main();
