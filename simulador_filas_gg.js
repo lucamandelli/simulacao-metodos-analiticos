@@ -560,31 +560,57 @@ function mostrarResultadosFilaIndividual() {
 }
 
 function mostrarResultadosRede() {
-  console.log(`\nRESULTADOS DA SIMULAÇÃO DA REDE:`);
-  console.log("=".repeat(70));
-  console.log(
-    `Tempo total de simulação: ${tempoSimulacao.toFixed(4)} unidades`
-  );
-  console.log(`Números pseudoaleatórios utilizados: ${numerosUsados}`);
+  console.log("=========================================================");
+  console.log("======================    REPORT   ======================");
+  console.log("=========================================================");
 
   configRede.filas.forEach((fila) => {
     let stats = estatisticasFilas[fila.id];
-    console.log(
-      `\n${fila.nome.toUpperCase()} - G/G/${fila.numServidores}/${
-        fila.capacidade
-      }:`
-    );
-    console.log("-".repeat(50));
-    console.log(`Clientes perdidos: ${stats.clientesPerdidos}`);
 
-    mostrarDistribuicaoEstados(stats.temposEstados, fila.nome, tempoSimulacao);
-    mostrarAnalise(
-      stats.temposEstados,
-      stats.clientesPerdidos,
-      fila.numServidores,
-      tempoSimulacao
+    console.log("*********************************************************");
+    console.log(
+      `Queue:   ${fila.nome} (G/G/${fila.numServidores}/${fila.capacidade})`
     );
+
+    // Show arrival info only for queues that receive external arrivals
+    if (fila.minChegada !== null) {
+      console.log(
+        `Arrival: ${fila.minChegada.toFixed(1)} ... ${fila.maxChegada.toFixed(
+          1
+        )}`
+      );
+    }
+
+    console.log(
+      `Service: ${fila.minAtendimento.toFixed(
+        1
+      )} ... ${fila.maxAtendimento.toFixed(1)}`
+    );
+    console.log("*********************************************************");
+
+    mostrarTabelaEstadosFormatada(stats.temposEstados, tempoSimulacao);
+
+    console.log("");
+    console.log(`Number of losses: ${stats.clientesPerdidos}`);
+    console.log("");
   });
+
+  console.log("=========================================================");
+  console.log(`Simulation average time: ${tempoSimulacao.toFixed(4)}`);
+  console.log("=========================================================");
+}
+
+function mostrarTabelaEstadosFormatada(temposEstados, tempoTotal) {
+  console.log("   State               Time               Probability");
+
+  for (let i = 0; i < temposEstados.length; i++) {
+    let probabilidade = (temposEstados[i] / tempoTotal) * 100;
+    let estado = i.toString().padStart(6);
+    let tempo = temposEstados[i].toFixed(4).padStart(15);
+    let prob = probabilidade.toFixed(2).padStart(15) + "%";
+
+    console.log(`${estado}${tempo}${prob}`);
+  }
 }
 
 function mostrarDistribuicaoEstados(temposEstados, nomeFila, tempoTotal) {
